@@ -956,7 +956,14 @@ pub fn notify_observers_generic<M: AssemblyBackend>(
 /// Process Jacobian with Jacobi scaling (generic over assembly mode).
 ///
 /// On `iteration == 0`, computes the scaling factors and stores them.
-/// On subsequent iterations, reuses the cached scaling.
+/// On subsequent iterations, reuses the cached scaling — Ceres fixes its
+/// `jacobian_scaling_` at the first iteration the same way. Recomputing the
+/// column norms every iteration was measured on bundle-adjustment problems and
+/// changed neither the iteration count nor the final cost, which is what the
+/// invariance documented on
+/// [`use_jacobi_scaling`](crate::optimizer::levenberg_marquardt::LevenbergMarquardtConfig::use_jacobi_scaling)
+/// predicts: under the default Marquardt diagonal damping the scaling cancels
+/// out of the step entirely, so how stale it is cannot matter.
 pub fn process_jacobian_generic<M: AssemblyBackend>(
     jacobian: &M::Jacobian,
     jacobi_scaling: &mut Option<Vec<f64>>,

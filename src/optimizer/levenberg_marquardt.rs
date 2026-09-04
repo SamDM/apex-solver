@@ -332,8 +332,33 @@ pub struct LevenbergMarquardtConfig {
     /// Use Jacobi column scaling (preconditioning)
     ///
     /// When enabled, normalizes Jacobian columns by their L2 norm before solving.
-    /// This can improve convergence for problems with mixed parameter scales
-    /// (e.g., positions in meters + angles in radians) but adds ~5-10% overhead.
+    /// This can improve the conditioning of the factorisation for problems with
+    /// mixed parameter scales (e.g. positions in metres + angles in radians),
+    /// at ~5-10% overhead.
+    ///
+    /// # It does not change the iterates under the default damping
+    ///
+    /// With the Marquardt diagonal — the default, see [`min_diagonal`] — the
+    /// scaling cancels out of the damped system exactly. Writing `J̃ = J·S`,
+    /// `diag(SᵀHS) = S·diag(H)·S`, so
+    ///
+    /// ```text
+    /// (J̃ᵀJ̃ + λ·diag(J̃ᵀJ̃))·dx̃ = −J̃ᵀr   ⟺   S·(H + λ·diag(H))·S·dx̃ = −S·Jᵀr
+    /// ```
+    ///
+    /// and the un-scaled step `S·dx̃` solves the un-scaled damped system. The
+    /// trajectory is therefore identical with this flag on and off, down to
+    /// rounding; only the conditioning of the matrix handed to the
+    /// factorisation differs.
+    ///
+    /// The cancellation needs the damping to scale with the columns, so it does
+    /// *not* apply to uniform `λ·I` damping
+    /// ([`with_diagonal_bounds(1.0, 1.0)`](LevenbergMarquardtConfig::with_diagonal_bounds)),
+    /// where the flag genuinely changes the iterates. Reach for it there, or
+    /// for conditioning; reaching for it to fix slow convergence under the
+    /// default damping will do nothing.
+    ///
+    /// [`min_diagonal`]: Self::min_diagonal
     ///
     /// Default: false (to avoid performance overhead and faster convergence)
     pub use_jacobi_scaling: bool,
