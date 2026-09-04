@@ -516,9 +516,14 @@ impl SE3Tangent {
         let theta_squared = theta.norm_squared();
 
         let a = 0.5;
-        let mut b = 1.0 / 6.0 + 1.0 / 120.0 * theta_squared;
-        let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
-        let mut d = -1.0 / 60.0;
+        // Maclaurin expansions, used where the closed forms below lose
+        // precision as theta -> 0:
+        //   b = (θ − sinθ)/θ³            = 1/6 − θ²/120 + …
+        //   c = (1 − θ²/2 − cosθ)/θ⁴     = −1/24 + θ²/720 + …
+        //   d = ½(c − 3(θ − sinθ − θ³/6)/θ⁵) = −1/120 + θ²/2520 + …
+        let mut b = 1.0 / 6.0 - theta_squared / 120.0;
+        let mut c = -1.0 / 24.0 + theta_squared / 720.0;
+        let mut d = -1.0 / 120.0 + theta_squared / 2520.0;
 
         if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
@@ -530,17 +535,19 @@ impl SE3Tangent {
 
             b = (theta_norm - sin_theta) / theta_norm_3;
             c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
-            d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
+            d = 0.5 * (c - 3.0 * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5);
         }
 
         let tr = theta_skew * rho_skew;
         let rt = rho_skew * theta_skew;
         let trt = tr * theta_skew;
         let rt_t2 = rt * theta_skew;
+        // θₓρₓθ²ₓ; its transpose is θ²ₓρₓθₓ, the formula's companion term.
+        let trt_t = trt * theta_skew;
 
         rho_skew * a + (tr + rt + trt) * b
             - (rt_t2 - rt_t2.transpose() - trt * 3.0) * c
-            - (trt * theta_skew) * d
+            - (trt_t + trt_t.transpose()) * d
     }
 }
 
@@ -588,9 +595,14 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
+        // Both diagonal blocks are SO(3)'s *right* Jacobian at +theta. Writing
+        // this as `SO3Tangent::new(-theta).right_jacobian()` computes
+        // `Jr(-theta) == Jl(theta)` — the left Jacobian — which agrees with Jr
+        // only at theta == 0 and drifts from it as the rotation grows.
+        let theta_right_jac = SO3Tangent::new(theta).right_jacobian();
         jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
         jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
+        // Qr(rho, theta) == Ql(-rho, -theta), from Jr(tau) == Jl(-tau).
         jac.fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&SE3Tangent::q_block_jacobian_matrix(-rho, -theta));
         jac
@@ -646,13 +658,19 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
+        // Inverse of the block-triangular Jr above:
+        //   Jr⁻¹ = [[A, -A·Qr·A], [0, A]]  with  A = Jr_SO3(theta)⁻¹.
+        // The `left_jacobian_inv` used here previously is Jl_SO3(theta)⁻¹, the
+        // inverse of the wrong diagonal block; it stayed a consistent inverse
+        // of the old `right_jacobian`, so `Jr·Jr⁻¹ == I` still held and hid the
+        // error.
+        let theta_right_inv_jac = SO3Tangent::new(theta).right_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(-rho, -theta);
         jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
+            .copy_from(&theta_right_inv_jac);
         jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-        let top_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
+            .copy_from(&theta_right_inv_jac);
+        let top_right = -1.0 * theta_right_inv_jac * q_block_jac * theta_right_inv_jac;
         jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
         jac
     }
@@ -1591,6 +1609,125 @@ mod tests {
             "Jl * Jl_inv should be identity, got error: {}",
             (product - Matrix6::identity()).norm()
         );
+    }
+
+    /// Sample tangent vectors spanning zero, small and large rotations — the
+    /// regime where a wrong Jacobian is only visible once theta grows.
+    fn jacobian_test_tangents() -> Vec<SE3Tangent> {
+        [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([0.5, -0.2, 0.3], [0.0, 0.0, 0.0]),
+            ([0.5, -0.2, 0.3], [1e-4, 0.0, 0.0]),
+            ([0.5, -0.2, 0.3], [0.1, 0.0, 0.0]),
+            ([0.5, -0.2, 0.3], [0.3, -0.4, 0.2]),
+            ([1.0, 0.5, -0.7], [0.9, 0.3, -0.5]),
+            ([-2.0, 1.5, 0.4], [1.4, -1.1, 0.8]),
+        ]
+        .into_iter()
+        .map(|(rho, theta)| {
+            SE3Tangent::new(
+                Vector3::new(rho[0], rho[1], rho[2]),
+                Vector3::new(theta[0], theta[1], theta[2]),
+            )
+        })
+        .collect()
+    }
+
+    fn perturbed(tangent: &SE3Tangent, index: usize, delta: f64) -> SE3Tangent {
+        let mut coeffs = tangent.as_slice().to_vec();
+        coeffs[index] += delta;
+        SE3Tangent::from_slice(&coeffs)
+    }
+
+    /// `Jr` is *defined* by `exp(τ + δ) ≈ exp(τ) ∘ exp(Jr(τ)·δ)`, so the k-th
+    /// column of `Jr` is `log(exp(τ)⁻¹ ∘ exp(τ + ε·e_k)) / ε`.
+    ///
+    /// `Jr · Jr⁻¹ == I` (tested above) does *not* imply this: a consistent
+    /// inverse of the wrong matrix satisfies it just as well, which is how an
+    /// earlier version that returned the *left* Jacobian here went unnoticed.
+    #[test]
+    fn se3_right_jacobian_matches_its_defining_property() {
+        let eps = 1e-7;
+        for tangent in jacobian_test_tangents() {
+            let jr = tangent.right_jacobian();
+            let base = tangent.exp(None);
+            for k in 0..6 {
+                let plus = perturbed(&tangent, k, eps).exp(None);
+                let minus = perturbed(&tangent, k, -eps).exp(None);
+                // Right perturbation: log(base⁻¹ ∘ exp(τ ± ε·e_k)).
+                let dp = plus.minus(&base, None, None).as_slice().to_vec();
+                let dm = minus.minus(&base, None, None).as_slice().to_vec();
+                for row in 0..6 {
+                    let fd = (dp[row] - dm[row]) / (2.0 * eps);
+                    assert!(
+                        (jr[(row, k)] - fd).abs() < 1e-6,
+                        "Jr[{row},{k}] = {} but finite differences give {fd} for tau = {:?}",
+                        jr[(row, k)],
+                        tangent.as_slice()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `Jl` is defined by `exp(τ + δ) ≈ exp(Jl(τ)·δ) ∘ exp(τ)`, i.e. the
+    /// left-perturbation counterpart of the test above.
+    #[test]
+    fn se3_left_jacobian_matches_its_defining_property() {
+        let eps = 1e-7;
+        for tangent in jacobian_test_tangents() {
+            let jl = tangent.left_jacobian();
+            let base_inv = tangent.exp(None).inverse(None);
+            for k in 0..6 {
+                let plus = perturbed(&tangent, k, eps).exp(None);
+                let minus = perturbed(&tangent, k, -eps).exp(None);
+                // Left perturbation: log(exp(τ ± ε·e_k) ∘ base⁻¹).
+                let dp = plus
+                    .compose(&base_inv, None, None)
+                    .log(None)
+                    .as_slice()
+                    .to_vec();
+                let dm = minus
+                    .compose(&base_inv, None, None)
+                    .log(None)
+                    .as_slice()
+                    .to_vec();
+                for row in 0..6 {
+                    let fd = (dp[row] - dm[row]) / (2.0 * eps);
+                    assert!(
+                        (jl[(row, k)] - fd).abs() < 1e-6,
+                        "Jl[{row},{k}] = {} but finite differences give {fd} for tau = {:?}",
+                        jl[(row, k)],
+                        tangent.as_slice()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `Jr(τ) == Jl(−τ)`: the two Jacobians are reflections of one another, so
+    /// they must *not* come out equal for a rotating tangent. The pre-fix code
+    /// gave both the same diagonal blocks, which this pins against.
+    #[test]
+    fn se3_right_and_left_jacobians_are_reflections() {
+        for tangent in jacobian_test_tangents() {
+            let negated: Vec<f64> = tangent.as_slice().iter().map(|v| -v).collect();
+            let mirrored = SE3Tangent::from_slice(&negated);
+            let diff = (tangent.right_jacobian() - mirrored.left_jacobian()).norm();
+            assert!(
+                diff < 1e-12,
+                "Jr(tau) should equal Jl(-tau), differ by {diff} for tau = {:?}",
+                tangent.as_slice()
+            );
+            if tangent.theta().norm() > 1e-3 {
+                let same = (tangent.right_jacobian() - tangent.left_jacobian()).norm();
+                assert!(
+                    same > 1e-6,
+                    "Jr and Jl must differ for a rotating tangent, got {same} for tau = {:?}",
+                    tangent.as_slice()
+                );
+            }
+        }
     }
 
     #[test]

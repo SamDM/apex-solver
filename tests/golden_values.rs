@@ -26,11 +26,18 @@ use std::collections::HashMap;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// (dataset, is_3d, golden final cost, tolerance)
+///
+/// The two 3D values were re-pinned when `SE3Tangent::right_jacobian` was
+/// corrected (it returned SO(3)'s *left* Jacobian on its diagonal blocks, exact
+/// only at zero rotation). Both moved *down* — parking-garage 6.245107e-1 →
+/// 6.245094e-1, sphere2500 2.131994e1 → 2.129065e1 — i.e. the solver reaches a
+/// better minimum now. The 2D values are unchanged to 1e-11, as expected: SE(2)
+/// does not go through that code path.
 const GOLDENS: &[(&str, bool, f64, f64)] = &[
     ("ring", false, 2.217_900_322_072e-2, 1e-6),
     ("M3500", false, 1.510_940_460_434e0, 1e-6),
-    ("parking-garage", true, 6.245_107_165_929e-1, 1e-6),
-    ("sphere2500", true, 2.131_994_494_757e1, 1e-6),
+    ("parking-garage", true, 6.245_093_871_665e-1, 1e-6),
+    ("sphere2500", true, 2.129_064_817_866e1, 1e-6),
 ];
 
 fn solve(dataset: &str, is_3d: bool) -> Result<f64, Box<dyn std::error::Error>> {
