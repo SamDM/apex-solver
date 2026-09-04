@@ -266,6 +266,38 @@ pub(crate) fn compute_block_into(
         0.5 * squared_norm
     };
 
+    // Zero the columns belonging to fixed DOFs, last, so nothing downstream
+    // re-populates them.
+    //
+    // `ManifoldVariable::apply_tangent_step` drops a fixed DOF's component of
+    // the step. If its Jacobian column survives into the linear system, the
+    // solver still plans motion along it and
+    // `compute_predicted_reduction` still charges for that motion — but the
+    // move never happens, so the actual reduction cannot match the predicted
+    // one and the trust-region ratio rho is wrong on every problem with a
+    // gauge fix, which is every bundle-adjustment problem.
+    if let Some(buf) = jacobian_buf {
+        for (&var_key, &(local_idx, var_size)) in residual_block
+            .variable_keys
+            .iter()
+            .zip(variable_local_idx_size_list.iter())
+        {
+            let Some(variable) = variables.get(var_key) else {
+                continue;
+            };
+            let fixed = variable.get_fixed_indices();
+            if fixed.is_empty() {
+                continue;
+            }
+            for &dof in fixed {
+                if dof < var_size {
+                    let col = local_idx + dof;
+                    buf[col * rows..(col + 1) * rows].fill(0.0);
+                }
+            }
+        }
+    }
+
     Ok((
         BlockLinearization {
             variable_local_idx_size_list,
