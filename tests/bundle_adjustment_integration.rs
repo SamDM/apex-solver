@@ -115,7 +115,14 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
 
     // Iterative Schur is required for SelfCalibration because intrinsics (RN, 3 DOF) and
     // landmarks (RN, 3 DOF) are indistinguishable for the Sparse Schur block classifier.
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(50);
+    //
+    // The 50-iteration cap this used to carry was tuned against a solver whose
+    // step-quality ratio was wrong: LM read a `rho` pinned near 0.1, ratcheted
+    // λ up on every accepted step and gave up at cost 1.767e4 after 38
+    // iterations. With `rho` honest it keeps descending instead of stalling,
+    // reaching a 22% lower cost (1.370e4) — but it needs ~67 iterations to get
+    // there, so the old cap would report a false non-convergence.
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(100);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -156,6 +163,18 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         "Final RMSE ({:.4}) should be less than initial RMSE ({:.4})",
         final_rmse,
         initial_rmse
+    );
+
+    // Pin the quality, not just the direction: converging to a worse point is
+    // exactly the failure mode a status-only assertion misses. The bound sits
+    // between what this problem reaches now (1.370e4) and the 1.767e4 the
+    // solver stalled at before the step-quality fixes, so a regression to that
+    // behaviour fails here rather than passing as "converged".
+    assert!(
+        result.final_cost < 1.5e4,
+        "final cost {:.6e} is above the 1.5e4 quality bar; the solver reached \
+         1.370e4 when this bound was set",
+        result.final_cost
     );
 
     Ok(())
