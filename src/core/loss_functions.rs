@@ -500,10 +500,16 @@ impl LossFunction for CauchyLoss {
         let inv = 1.0 / sum; // 1 / (1 + s/δ²)
 
         // Note: sum and inv are always positive, assuming s ≥ 0
+        // ρ(s) must be the exact antiderivative of the ρ'(s) below, or the
+        // optimizer's cost (0.5·ρ(s)) and its gradient (ρ'(s)·Jᵀr) describe
+        // different functions and the trust-region ratio rho is off by that
+        // factor — a spurious `/ 2.0` here made every Cauchy-weighted step
+        // report rho = 0.5. d/ds [δ²·ln(1 + s/δ²)] = 1/(1 + s/δ²). Matches
+        // Ceres' CauchyLoss.
         [
-            self.scale2 * sum.ln() / 2.0, // ρ(s) = (δ²/2) * ln(1 + s/δ²)
-            inv.max(f64::MIN),            // ρ'(s) = 1 / (1 + s/δ²)
-            -self.c * (inv * inv),        // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
+            self.scale2 * sum.ln(), // ρ(s) = δ² · ln(1 + s/δ²)
+            inv.max(f64::MIN),      // ρ'(s) = 1 / (1 + s/δ²)
+            -self.c * (inv * inv),  // ρ''(s) = -1 / (δ² · (1 + s/δ²)²)
         ]
     }
 }
@@ -1848,6 +1854,48 @@ mod tests {
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
 
+        Ok(())
+    }
+
+    /// `ρ(s)` must be the exact antiderivative of the `ρ'(s)` returned beside
+    /// it: the optimizer takes the block's cost from `0.5·ρ(s)` and its
+    /// gradient from `ρ'(s)·Jᵀr`, so a constant factor between the two makes
+    /// the trust-region ratio `rho` off by that same factor for every
+    /// Cauchy-weighted residual. A spurious `/ 2.0` in `ρ(s)` used to report
+    /// `rho = 0.5` on every step.
+    #[test]
+    fn cauchy_rho_is_the_antiderivative_of_rho_prime() -> TestResult {
+        let loss = CauchyLoss::new(1.0)?;
+
+        // Closed form at a point, so the test pins the scale and not just the
+        // internal consistency: ρ(3) = 1²·ln(1 + 3) = ln 4.
+        let [rho, _, _] = loss.evaluate(3.0);
+        assert!(
+            (rho - 4.0_f64.ln()).abs() < EPSILON,
+            "rho(3) should be ln(4) = {}, got {rho}",
+            4.0_f64.ln()
+        );
+
+        // Both checks are central differences of the entry one order below, so
+        // neither goes through an ill-conditioned second difference.
+        for s in [0.05, 0.25, 0.7, 1.7, 4.0, 9.0, 16.0, 40.0] {
+            let [_, rho_prime, rho_double_prime] = loss.evaluate(s);
+            let h = 1e-6 * s;
+            let plus = loss.evaluate(s + h);
+            let minus = loss.evaluate(s - h);
+
+            let d_rho = (plus[0] - minus[0]) / (2.0 * h);
+            assert!(
+                (rho_prime - d_rho).abs() < 1e-6 * d_rho.abs().max(1.0),
+                "at s = {s}: rho' = {rho_prime} but d(rho)/ds = {d_rho}"
+            );
+
+            let d_rho_prime = (plus[1] - minus[1]) / (2.0 * h);
+            assert!(
+                (rho_double_prime - d_rho_prime).abs() < 1e-6 * d_rho_prime.abs().max(1.0),
+                "at s = {s}: rho'' = {rho_double_prime} but d(rho')/ds = {d_rho_prime}"
+            );
+        }
         Ok(())
     }
 
