@@ -43,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One-parameter subgroup law tests for all eight manifolds**
   (`exp(aξ)∘exp(bξ) = exp((a+b)ξ)`) plus an SGal(3) Jacobian composition check with strong
   time–velocity coupling.
+- **Step-quality invariants pinned** (`tests/lm_step_quality.rs`). ρ is the only signal the
+  damping policy reads, so an error in it does not surface as a wrong answer — the solver
+  still descends, just steered by noise. Two properties make ρ checkable without a reference
+  implementation: a linear residual has an exact quadratic model, so `ρ == 1` on every
+  iteration whatever the damping or scaling; and as `λ → ∞` the step length → 0, so the model
+  becomes exact and `ρ → 1` on *any* problem. The second is what located the SE(3) Jacobian
+  and fixed-DOF faults under **Fixed**, and is covered across rotation magnitudes, with and
+  without a gauge fix, and under each robust loss. Also pinned: Jacobi scaling does not move the
+  iterates under the default Marquardt diagonal damping — it cancels out of the damped system
+  exactly — but does under uniform `λ·I`, both directions asserted so the test cannot pass by
+  scaling silently not being applied.
+- **[`doc/step_quality.md`](step_quality.md)** — what ρ steers, those two invariants and
+  how to bisect with them, the faults they found with the signature that identified each, why
+  `Jr·Jr⁻¹ == I` is not a test of `Jr`, and the outstanding items (`Sim3`/`SE23` right
+  Jacobians, `AndrewsWaveLoss`/`TrimmedMeanLoss` derivatives).
 
 ### Fixed
 
@@ -58,6 +73,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself expected to make things worse was accepted. Ceres treats a non-positive
   `model_cost_change` as an invalid step; it is now rejected. The near-zero case is unchanged,
   since at the solution both reductions legitimately vanish.
+
+- **`SE3Tangent::right_jacobian` returned the *left* Jacobian.** Both diagonal blocks came
+  from `SO3Tangent::new(-theta).right_jacobian()`, which is `Jr(-θ) == Jl(θ)`; the two agree
+  only at `θ = 0` and diverge as the rotation grows. `right_jacobian_inv` inverted the same
+  wrong block, so `Jr·Jr⁻¹ == I` held and the existing identity tests passed throughout — a
+  consistent inverse of the wrong matrix satisfies them. The shared Q block was wrong
+  independently: its `d` coefficient multiplied `3` into the wrong factor and dropped a `½`,
+  its last group carried only `θ̂ρ̂θ̂²` and not the companion `θ̂²ρ̂θ̂`, and the small-angle
+  series had a sign error on `b`'s θ² term and a factor of 2 on `d`'s (that one also affected
+  `left_jacobian`). Relative error against `Jr`'s defining property at `|θ| ≈ 1.1 rad`:
+  `7.7e-1 → 8.7e-10`. `log`'s Jacobian is `Jr⁻¹` of its result, so `BetweenFactor` and
+  `PriorFactor` on SE(3) inherited a gradient that disagreed with the retraction
+  `apply_tangent_step` applies, and the step-quality ratio ρ settled near 0.93 instead of 1 on
+  rotating pose graphs — enough for the damping policy to raise λ on every accepted step and
+  stall. Both 3D goldens move **down** (a better minimum): `parking-garage`
+  6.245107e-1 → 6.245094e-1, `sphere2500` 2.131994e1 → 2.129065e1; the 2D goldens are
+  unchanged to 1e-11. `Jr` and `Jl` are now tested against their defining properties directly.
+  **`Sim3` and `SE23` still carry this bug** — see [`doc/step_quality.md`](step_quality.md).
+
+- **Fixed DOFs stayed in the linear system.** `ManifoldVariable::apply_tangent_step` zeroes a
+  fixed DOF's component of the step, but nothing removed its Jacobian columns from the
+  assembled system, so the solver planned motion along those directions and
+  `compute_predicted_reduction` charged for it while the move never happened. `fix_variable`
+  is how gauge freedom is handled, which made this permanent on every bundle-adjustment
+  problem rather than a corner case: on an SE(3) chain with one pose pinned, ρ came out at
+  0.56 under damping heavy enough that it must be 1. `compute_block_into` now zeroes those
+  columns after noise whitening and the robust-loss correction.
+
+- **`CauchyLoss`'s `ρ(s)` was half of what its own `ρ'(s)` integrates to.** `evaluate`
+  returned `ρ(s) = (δ²/2)·ln(1 + s/δ²)` beside `ρ'(s) = 1/(1 + s/δ²)`, but the derivative of
+  that ρ is half that ρ'. The optimizer takes a block's cost from `0.5·ρ(s)` and its gradient
+  from `ρ'(s)·Jᵀr` through the Triggs corrector, so the two described different functions and
+  every Cauchy-weighted step reported ρ = 0.5 exactly. Now matches Ceres' `CauchyLoss`.
+  `AndrewsWaveLoss` and `TrimmedMeanLoss` have the same class of defect and are **not** fixed
+  — see [`doc/step_quality.md`](step_quality.md).
 
 - **λ, ν, the trust-region radius and μ were stored in the config and mutated during a solve**,
   so a second `optimize()` call on the same solver silently started from wherever the previous

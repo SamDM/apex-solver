@@ -340,6 +340,17 @@ self-calibration bundle adjustment.
 
 ---
 
+## Solver Diagnostics
+
+The trust-region ratio ρ is the only signal the damping policy reads, so an error in it shows
+up as a bad damping schedule rather than a wrong answer — a solve that crawls, or one that
+stalls at a poor point. Two invariants make it checkable without a reference implementation,
+and there is a record of the faults they have found.
+
+→ **[The step-quality ratio ρ](doc/step_quality.md)**
+
+---
+
 ## Technical Implementation
 
 ### Robust Loss Functions
