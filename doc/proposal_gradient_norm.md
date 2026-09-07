@@ -114,10 +114,11 @@ Three caveats against treating that as the answer:
    while `gradient_tolerance` carries units of cost per parameter. Multiplying
    one by the other is not a relationship. Do not copy it.
 
-3. **Ceres tried the relative form and abandoned it.** Through 1.8 the test was
-   `‖g(x)‖∞ < gradient_tolerance · ‖g(x₀)‖∞`; 1.9.0 replaced it with the
-   absolute form (`version_history.rst`). The entry does not say why. Worth
-   knowing before reaching for option B below as an obvious improvement.
+3. **Ceres tried anchoring to the initial gradient and abandoned it.** Through
+   1.8 the test was `‖g(x)‖∞ < gradient_tolerance · ‖g(x₀)‖∞`, i.e. scaled by
+   the gradient at the *starting point*; 1.9.0 dropped the `‖g(x₀)‖∞` factor
+   (`version_history.rst`). The entry does not say why. Worth knowing before
+   reaching for option B below as an obvious improvement.
 
 The `Π ⊞(x, −g)` construction is deliberately **not** part of this proposal. It
 buys projection onto bounds and lifting through the manifold retraction. apex
@@ -128,13 +129,39 @@ else. So the projection would be a no-op wrapped in machinery, and for an
 unconstrained Euclidean problem the whole expression reduces to `|g|∞`. If
 bounds are ever wired into the optimizer, revisit it then.
 
+## Two senses of "relative"
+
+The word does double duty in this area and the two meanings behave very
+differently, so this document keeps them apart:
+
+- **Relative to a moving reference** — the *current* cost, the *current* `‖x‖`.
+  Re-anchored every iteration. This is what `cost_tolerance` and
+  `parameter_tolerance` do, in apex and in Ceres alike, and it is
+  uncontroversial: "am I still making progress relative to where I am now" is
+  always a meaningful question.
+- **Relative to a fixed starting reference** — `‖g(x₀)‖`, captured once at the
+  seed. This is option B below, and the thing Ceres removed in 1.9.0.
+
+The second is the weaker of the two: anchoring to the seed makes the stopping
+point depend on where the solve started, so the same problem from two
+initialisations converges to different places, and a solve seeded near the
+solution has `g₀ ≈ 0` and can never clear the bar. Those look like the reasons
+it did not survive, though Ceres does not say.
+
+**apex's gradient test has never been relative in either sense.**
+`check_convergence` has tested `‖g‖ < gradient_tolerance` outright since the
+criterion was introduced (`5b6b97a`), the line is byte-identical across every
+revision of the file since, and no commit in this repository has ever referenced
+an initial or reference gradient. So there is nothing here to undo: option B
+would be an addition, and Ceres' experience is evidence against making it.
+
 ## Options considered
 
 **A. Max norm** — `‖Jᵀr‖∞ < gradient_tolerance`.
 More interpretable, matches Ceres, size-independent in principle. Measured
 effect on these problems: 3–7×. Needs a new default and a goldens check.
 
-**B. Relative to the initial gradient** — `‖g‖ ≤ gtol · ‖g₀‖`.
+**B. Anchor to the initial gradient** — `‖g‖ ≤ gtol · ‖g₀‖`.
 The only option that makes the tolerance genuinely dimensionless. Two real
 costs: meaningless when the solve starts near the solution (`g₀ ≈ 0`), and the
 stopping point becomes seed-dependent, so the same problem from two
@@ -188,8 +215,9 @@ anyone actually has at that point.
 
 `gradient_tolerance` stays unit-dependent under every option except B. The
 practical guidance, unchanged by this proposal: **`cost_tolerance` and
-`parameter_tolerance` are the portable criteria.** Both are relative in apex and
-in Ceres, both are dimensionless, and both mean the same thing on every problem
+`parameter_tolerance` are the portable criteria.** Both are relative to a moving
+reference in apex and in Ceres, both are dimensionless, and both mean the same
+thing on every problem
 — and per the evidence above, both are what actually terminates every real solve
 in this repository. `gradient_tolerance` is best set conservatively and treated
 as a safety net rather than the criterion a solve is expected to stop on.
