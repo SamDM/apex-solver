@@ -57,9 +57,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **[`doc/proposal_gradient_norm.md`](proposal_gradient_norm.md)** — a written-up proposal
   (not implemented) to measure the gradient convergence test in the max norm rather than L2,
   with measurements across the repository's own datasets. Those measurements did not support
-  the argument the proposal was started to make — the √N effect does not materialise, and the
-  criterion turns out to be unreachable at its default on every real problem here — so the
-  document records that too rather than the tidier story.
+  the argument the proposal was started to make — on real problems the √N effect does not
+  materialise, and the criterion turns out to be unreachable at its default everywhere here —
+  so the document records that too rather than the tidier story. A controlled fixture then
+  isolates what *does* set the reachable floor: it goes as **`K²` in the Jacobian's column
+  scale and only as `√D` in the parameter count** (`‖g‖₂/K²` constant to four significant
+  figures across four decades of `K`). So `gradient_tolerance` is unreachable not because a
+  problem is large but because its Jacobian is not `O(1)` — true of essentially every
+  calibration or physical-units problem — and no single default can serve callers whose units
+  differ.
 - **[`doc/step_quality.md`](step_quality.md)** — what ρ steers, those two invariants and
   how to bisect with them, the faults they found with the signature that identified each, why
   `Jr·Jr⁻¹ == I` is not a test of `Jr`, and the outstanding items (`Sim3`/`SE23` right

@@ -176,7 +176,7 @@ The cancellation needs the damping to scale with the columns, so it does *not*
 apply to uniform `λ·I` damping (`with_diagonal_bounds(1.0, 1.0)`), where the
 flag genuinely changes the iterates.
 
-Two consequences:
+Three consequences:
 
 - Reaching for this flag to fix slow convergence under the default damping will
   do nothing. The slow convergence has another cause — very likely a ρ that is
@@ -186,6 +186,26 @@ Two consequences:
   principle. Recomputing them every iteration was measured on bundle-adjustment
   problems and changed neither the iteration count nor the final cost. Ceres
   fixes its `jacobian_scaling_` at the first iteration the same way.
+- **If the flag appears to change the iteration count, suspect the reporting
+  before the iterates.** That is exactly how the gradient-units bug was found:
+  the convergence test was reading the *scaled* gradient, so turning scaling on
+  made `gradient_tolerance` a looser test and solves stopped a step earlier —
+  which reads as a conditioning win and is not one. Post-fix the count should
+  move only by rounding.
+
+### The `min_diagonal` clamp is not the loophole it looks like
+
+`D_jj = clamp(JᵀJ_jj, min_diagonal, max_diagonal)`, and clamping does not
+commute with scaling — `clamp(s²·h) ≠ s²·clamp(h)` — so in principle the clamp
+*does* break the cancellation identity above. In practice it does not, and it is
+worth writing down why so the exception does not get rediscovered as a bug.
+
+With `s = 1/(1 + ‖c‖)` and `h = ‖c‖²` for a column `c`, the unscaled diagonal
+crosses the default `min_diagonal = 1e-6` at `‖c‖ = 1e-3`, and the scaled one at
+`‖c‖ ≈ 1.001e-3`. The two saturate at practically the same place, so the window
+in which they disagree is 0.1% wide in column norm. Setting
+`with_diagonal_bounds(1e-30, 1e30)` — `D = diag(JᵀJ)` exactly, no saturation
+anywhere — leaves the on/off difference where it was.
 
 ## Outstanding
 

@@ -55,13 +55,18 @@ via temporary instrumentation in `compute_step_generic`.
 
 Two things fall out, and both cut against the argument above.
 
-**1. The √N effect does not materialise.** Ratios land between 2.7 and 6.9,
-against √N values of 36 to 185. Real gradients are *concentrated* — a handful of
-components dominate — so the L2 norm behaves far more like a max norm than like
-`ε·√N`. Worse for the argument, the ratio does not track problem size at all:
-the **smallest** problem (ring, N = 1 302) has the **largest** ratio, and the
-largest problem has nearly the smallest. Whatever drives the ratio, it is the
+**1. The √N effect does not materialise on real problems.** Ratios land between
+2.7 and 6.9, against √N values of 36 to 185. Real gradients are *concentrated* —
+a handful of components dominate — so the L2 norm behaves far more like a max
+norm than like `ε·√N`. Worse for the argument, the ratio does not track problem
+size at all: the **smallest** problem (ring, N = 1 302) has the **largest**
+ratio, and the largest has nearly the smallest. What drives the ratio is the
 shape of the gradient, not the count of parameters.
+
+`ε·√N` is the *uniform-gradient* case, and it is an upper bound rather than a
+prediction. A synthetic fixture with every component equal by construction does
+follow it exactly (see the next section), which is worth knowing before reading
+too much into a benchmark built from one.
 
 So the practical effect of switching norms is a factor of roughly 3–7, not 100.
 The remaining defensible complaint is narrower: the ratio spans 2.4× across
@@ -88,6 +93,61 @@ That does not make it harmless — it fires readily on small or synthetic
 problems, which is where the scaled-units bug fixed alongside this document
 actually bit — but it does mean this proposal is a correctness-and-clarity
 change, not a performance or convergence one. It should be scheduled as such.
+
+## What actually sets the floor: the Jacobian's scale, not N
+
+The "unreachable" finding above invites the obvious follow-up — unreachable
+because of what? A controlled fixture separates the two candidates. Residual
+`r_i(x) = K·(x_i² − a_i)` with `a_i` non-square, so the root is irrational and
+the solve bottoms out on floating point rather than landing on the answer. `K`
+scales the Jacobian (`J_ii = 2·K·x_i`) without moving the solution, so the
+Jacobian's scale and the parameter count vary independently. Tolerances all
+zero, so the last reported norm is the achievable floor and not a stopping
+choice.
+
+| Jacobian scale `K` (at D = 20) | final ‖g‖₂ | ‖g‖₂ / K² |
+| ---: | ---: | ---: |
+| 1e0 | 8.7403e-15 | 8.740e-15 |
+| 1e1 | 8.7403e-13 | 8.740e-15 |
+| 1e2 | 8.7403e-11 | 8.740e-15 |
+| 1e3 | 8.7403e-9 | 8.740e-15 |
+| 1e4 | 8.7403e-7 | 8.740e-15 |
+
+| parameters `D` (at K = 1e3) | final ‖g‖₂ | ‖g‖₂ / √D |
+| ---: | ---: | ---: |
+| 2 | 1.8567e-9 | 1.313e-9 |
+| 20 | 8.7403e-9 | 1.954e-9 |
+| 200 | 2.6287e-8 | 1.859e-9 |
+| 2 000 | 8.3377e-8 | 1.864e-9 |
+
+**The floor goes as `K²` in the Jacobian's scale and only as `√D` in the size.**
+`‖g‖₂/K²` is constant to four significant figures across four decades of `K`;
+`‖g‖₂/√D` is flat across three decades of `D`. Four decades of Jacobian scale
+move the floor by eight; three decades of parameter count move it by one and a
+half.
+
+So size is not irrelevant — the `√D` term is real, and this uniform fixture is
+exactly the case where it shows — but it is dominated. An utterly ordinary
+`K = 1e3` (a focal length in pixels) raises the floor by `1e6`; matching that
+through size alone would take `1e12` more parameters.
+
+That reframes the earlier finding. `gradient_tolerance` is not unreachable
+because a problem is *large*; it is unreachable because a problem's Jacobian is
+not `O(1)`, which is true of essentially every calibration or
+physical-units problem. The default of `1e-10` is attainable only where
+`K ≲ 1`.
+
+A downstream project reported the corroborating case, on problems an order of
+magnitude *smaller* than anything in the table above:
+
+Reported downstream, not measured here:
+
+| source | DOF | final ‖g‖₂ | ended on gradient tol. |
+| --- | ---: | ---: | ---: |
+| downstream BA suite, 33 solves | 104–440 | 2.4e-9 – 1.3e2 | 0 of 33 |
+
+Their minimum of 2.36e-9 is what the `K²` law predicts for `K` between 3e2 and
+1e3 — the range a focal length in pixels lands in. Small problems, same wall.
 
 ## What Ceres does, and where that does not settle it
 
@@ -180,8 +240,10 @@ this library targets, or document that it is a small-problem safety net.
 Addresses the finding that actually showed up in the measurements.
 
 **E. Status quo, documented.** Say in the config docs that
-`gradient_tolerance` is an L2 threshold, roughly 3–7× the per-parameter slope
-it reads as, and effectively inert at its default on large problems.
+`gradient_tolerance` is an L2 threshold, roughly 3–7× the per-parameter slope it
+reads as, and that its reachable floor scales as `K²` in the Jacobian's column
+scale — so at the default it is inert on any problem whose parameters are not in
+`O(1)` units, regardless of size.
 
 ## Recommendation
 
@@ -191,8 +253,15 @@ the number more meaningful while leaving it just as unreachable.
 
 The default must be derived, not copied. Ceres's `1e-10` is a max-norm default
 and apex's `1e-10` is an L2 default, so their agreeing is a coincidence rather
-than compatibility — and per the table above, neither is attainable on a real
+than compatibility — and per the tables above, neither is attainable on a real
 pose graph.
+
+Deriving it will not rescue it either, and this is the strongest argument in the
+document. The threshold's units are the *caller's*, and the reachable floor goes
+as `K²`, so whatever number is chosen is wrong by `K²` for somebody — a factor
+of `1e6` for an ordinary focal length in pixels. **No single default can work.**
+That points at documentation and a *derived* default, or at the criterion being
+off unless explicitly configured, rather than at a better constant.
 
 Worth pairing with either: **report which parameter index carries the max**, at
 debug level. Free once the max norm is computed, and it turns "the solver did
@@ -202,7 +271,10 @@ anyone actually has at that point.
 ## Migration
 
 1. Report `‖g‖∞` alongside the L2 value at debug level for one release, so real
-   problems can be surveyed before any threshold moves.
+   problems can be surveyed before any threshold moves. Report the largest
+   column norm of `J` next to it: per the `K²` result above, that is what tells
+   a caller whether the criterion is reachable *for their problem* before they
+   try to tune it — more useful than either norm on its own.
 2. Switch the test; set the new default from that survey, not from Ceres.
 3. Re-check `tests/golden_values.rs`. All four goldens terminate on the cost
    tolerance today, so they will likely not move — but confirm rather than

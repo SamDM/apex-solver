@@ -351,8 +351,10 @@ and there is a record of the faults they have found.
 
 Convergence criteria have a related trap: `cost_tolerance` and `parameter_tolerance` are
 relative and portable, but `gradient_tolerance` is an absolute threshold on a quantity that
-carries the units of your parameters — and at its default it is effectively unreachable on
-large problems.
+carries the units of your parameters. The lowest gradient norm a solve can reach scales with
+the *square* of the Jacobian's column scale, so on anything whose Jacobian is not `O(1)` — a
+focal length in pixels, a stiffness, a scale factor — the default is unreachable however well
+the solve converges. Prefer the other two.
 
 → **[Proposal: the gradient convergence norm](doc/proposal_gradient_norm.md)**
 
