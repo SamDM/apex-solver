@@ -349,6 +349,13 @@ and there is a record of the faults they have found.
 
 → **[The step-quality ratio ρ](doc/step_quality.md)**
 
+Convergence criteria have a related trap: `cost_tolerance` and `parameter_tolerance` are
+relative and portable, but `gradient_tolerance` is an absolute threshold on a quantity that
+carries the units of your parameters — and at its default it is effectively unreachable on
+large problems.
+
+→ **[Proposal: the gradient convergence norm](doc/proposal_gradient_norm.md)**
+
 ---
 
 ## Technical Implementation

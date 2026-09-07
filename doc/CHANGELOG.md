@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iterates under the default Marquardt diagonal damping — it cancels out of the damped system
   exactly — but does under uniform `λ·I`, both directions asserted so the test cannot pass by
   scaling silently not being applied.
+- **[`doc/proposal_gradient_norm.md`](proposal_gradient_norm.md)** — a written-up proposal
+  (not implemented) to measure the gradient convergence test in the max norm rather than L2,
+  with measurements across the repository's own datasets. Those measurements did not support
+  the argument the proposal was started to make — the √N effect does not materialise, and the
+  criterion turns out to be unreachable at its default on every real problem here — so the
+  document records that too rather than the tidier story.
 - **[`doc/step_quality.md`](step_quality.md)** — what ρ steers, those two invariants and
   how to bisect with them, the faults they found with the signature that identified each, why
   `Jr·Jr⁻¹ == I` is not a test of `Jr`, and the outstanding items (`Sim3`/`SE23` right
@@ -73,6 +79,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself expected to make things worse was accepted. Ceres treats a non-positive
   `model_cost_change` as an invalid step; it is now rejected. The near-zero case is unchanged,
   since at the solution both reductions legitimately vanish.
+
+- **`gradient_tolerance` was tested against the *scaled* gradient.** The solver's cached
+  gradient is `J̃ᵀr` for whatever Jacobian it was handed, so under `use_jacobi_scaling` it is
+  `diag(s)·Jᵀr` — right for computing the step, wrong for a user-facing threshold. Since
+  `s_j = 1/(1 + ‖J_col_j‖) ≤ 1` always, comparing against the scaled norm could only ever
+  *loosen* the convergence test, by a factor set by the Jacobian's column norms. On a fixture
+  whose first column has ~1500x the norm of its second, the reported norm differed by three
+  orders of magnitude and the solve stopped an iteration early at the same point on an
+  identical trajectory — which reads as a conditioning win from the flag and is not one.
+  `final_gradient_norm` and the observer metric changed units with the flag too, so logs were
+  not comparable across it. All three optimizers were affected; Dog Leg most, since it enables
+  Jacobi scaling by default. The new `unscaled_gradient_norm` puts the reported norm back in
+  the problem's own units, matching the documented `‖Jᵀr‖` and matching Ceres, whose
+  `TrustRegionMinimizer` fills `gradient_` from the un-scaled Jacobian and applies
+  `ScaleColumns` only afterwards. Whether the *norm* should be L2 or max is a separate
+  question — see [`doc/proposal_gradient_norm.md`](proposal_gradient_norm.md).
 
 - **`SE3Tangent::right_jacobian` returned the *left* Jacobian.** Both diagonal blocks came
   from `SO3Tangent::new(-theta).right_jacobian()`, which is `Jr(-θ) == Jl(θ)`; the two agree
