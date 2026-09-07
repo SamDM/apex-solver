@@ -846,6 +846,48 @@ pub fn compute_predicted_reduction(
     -linear_term - 0.5 * quadratic_term
 }
 
+/// `‖Jᵀr‖₂`, the gradient norm in the *problem's own* units.
+///
+/// The solver's cached gradient is `J̃ᵀr` for whatever Jacobian it was handed.
+/// Under Jacobi scaling that is `J̃ = J·diag(s)`, so the cached vector is
+/// `diag(s)·Jᵀr` and its norm is in scaled units — which is right for the step
+/// computation but wrong for anything user-facing.
+///
+/// `gradient_tolerance` is an absolute threshold chosen by the caller in the
+/// problem's units, and `s_j = 1/(1 + ‖J_col_j‖) ≤ 1` always, so comparing
+/// against the scaled norm silently loosens the convergence test by a factor
+/// set by the Jacobian's column norms. The reported
+/// [`final_gradient_norm`](crate::optimizer::ConvergenceInfo::final_gradient_norm)
+/// and the observer metric would likewise change units with the flag, making
+/// logs incomparable across it.
+///
+/// Ceres keeps the same separation: `TrustRegionMinimizer` fills `gradient_`
+/// from the un-scaled Jacobian and applies `ScaleColumns` only afterwards, so
+/// its gradient convergence test never sees the scaling either.
+///
+/// Pass the optimizer's own `jacobi_scaling` field: it is `Some` exactly when
+/// scaling was applied to the Jacobian this solve, which is the condition that
+/// matters, and it is re-seeded to `None` at the start of every `optimize()`.
+/// `s_j` is bounded in `(0, 1]` by construction — column norms are
+/// non-negative — so the division is always well defined.
+///
+/// `gradient` is the full `Jᵀr` over every DOF, including on the Schur path
+/// (the reduced blocks `g_k`/`g_e` are split off locally and never published),
+/// so it is index-aligned with `scaling`.
+pub fn unscaled_gradient_norm(gradient: &Mat<f64>, scaling: Option<&Vec<f64>>) -> f64 {
+    let Some(scaling) = scaling else {
+        return gradient.norm_l2();
+    };
+    debug_assert_eq!(gradient.nrows(), scaling.len());
+    let sum: f64 = (0..gradient.nrows())
+        .map(|i| {
+            let g = gradient[(i, 0)] / scaling[i];
+            g * g
+        })
+        .sum();
+    sum.sqrt()
+}
+
 /// Compute step quality ratio (actual vs predicted reduction).
 ///
 /// Used by Levenberg-Marquardt and Dog Leg optimizers to evaluate

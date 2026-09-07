@@ -604,7 +604,11 @@ impl GaussNewton {
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             optimizer::OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
-        let gradient_norm = gradient.norm_l2();
+        // Un-scale before reporting: the cached gradient is `diag(s)·Jᵀr` under
+        // Jacobi scaling, and this norm is what `gradient_tolerance` is tested
+        // against and what observers see.
+        let gradient_norm =
+            optimizer::unscaled_gradient_norm(gradient, self.jacobi_scaling.as_ref());
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {

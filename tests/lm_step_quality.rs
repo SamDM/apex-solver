@@ -46,8 +46,8 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 // Observer capturing the per-iteration metrics
 // ---------------------------------------------------------------------------
 
-/// One iteration's `(damping, step_norm, step_quality)`.
-type MetricsRow = (Option<f64>, f64, Option<f64>);
+/// One iteration's `(damping, gradient_norm, step_norm, step_quality)`.
+type MetricsRow = (Option<f64>, f64, f64, Option<f64>);
 
 #[derive(Default)]
 struct MetricsLog {
@@ -68,12 +68,16 @@ impl MetricsLog {
     fn step_qualities(&self) -> Vec<f64> {
         self.rows()
             .iter()
-            .filter_map(|(_, _, quality)| *quality)
+            .filter_map(|(_, _, _, quality)| *quality)
             .collect()
     }
 
     fn step_norms(&self) -> Vec<f64> {
-        self.rows().iter().map(|(_, norm, _)| *norm).collect()
+        self.rows().iter().map(|(_, _, norm, _)| *norm).collect()
+    }
+
+    fn gradient_norms(&self) -> Vec<f64> {
+        self.rows().iter().map(|(_, norm, _, _)| *norm).collect()
     }
 }
 
@@ -86,7 +90,7 @@ impl OptObserver for SharedObserver {
     fn set_iteration_metrics(
         &self,
         _cost: f64,
-        _gradient_norm: f64,
+        gradient_norm: f64,
         damping: Option<f64>,
         step_norm: f64,
         step_quality: Option<f64>,
@@ -95,7 +99,7 @@ impl OptObserver for SharedObserver {
             .rows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((damping, step_norm, step_quality));
+            .push((damping, gradient_norm, step_norm, step_quality));
     }
 }
 
@@ -533,6 +537,84 @@ fn heavy_damping_drives_step_quality_to_one_under_robust_losses() -> TestResult 
             &format!("SE3 prior under loss {name}"),
         );
     }
+    Ok(())
+}
+
+/// The reported gradient norm is `‖Jᵀr‖` in the problem's own units, whatever
+/// `use_jacobi_scaling` is set to.
+///
+/// The solver's cached gradient is built from the Jacobian it was handed, so
+/// under scaling it is `diag(s)·Jᵀr`. That is the right vector for computing
+/// the step, but `gradient_tolerance` is an absolute threshold the caller
+/// chooses in the problem's units, and `s_j = 1/(1 + ‖J_col_j‖) ≤ 1` always —
+/// so testing the scaled norm silently loosened the convergence check by a
+/// factor set by the Jacobian's column norms. It also made
+/// `final_gradient_norm` and the observer metric change units with the flag,
+/// so logs could not be compared across it.
+///
+/// The fixture's first column has a norm ~1500x the second's, so the two norms
+/// differed by ~3 orders of magnitude before the fix.
+#[test]
+fn reported_gradient_norm_does_not_depend_on_jacobi_scaling() -> TestResult {
+    // Column 0's norm is ~1.7e3 against column 1's ~1.2, like a focal length
+    // beside a normalised coordinate.
+    let a = [[1.0e3, 1.0], [1.0e3, -0.5], [1.0e3, 0.3]];
+
+    let mut finals = Vec::new();
+    let mut per_iteration = Vec::new();
+    for use_jacobi_scaling in [false, true] {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let key = problem.add_variable(ManifoldType::RN, DVector::from_vec(vec![0.0, 0.0]));
+        problem.add_residual_block(
+            &[key],
+            Box::new(LinearFactor::new(a, [1.0e-3, 2.0], ATTAINABLE)),
+            None,
+        );
+
+        // Only the gradient test may fire, so the run length is a direct
+        // readout of where that threshold sits.
+        let config = LevenbergMarquardtConfig::default()
+            .with_max_iterations(50)
+            .with_gradient_tolerance(1e-8)
+            .with_cost_tolerance(0.0)
+            .with_parameter_tolerance(0.0)
+            .with_jacobi_scaling(use_jacobi_scaling);
+
+        let mut solver = LevenbergMarquardt::with_config(config);
+        let log = Arc::new(MetricsLog::default());
+        solver.add_observer(SharedObserver(log.clone()));
+        let result = solver.optimize(&mut problem)?;
+
+        let Some(info) = result.convergence_info else {
+            return Err("solver reported no convergence info".into());
+        };
+        finals.push((result.iterations, info.final_gradient_norm));
+        per_iteration.push(log.gradient_norms());
+    }
+
+    let (unscaled_iters, unscaled_final) = finals[0];
+    let (scaled_iters, scaled_final) = finals[1];
+
+    // The trajectories are identical on a linear problem, so the norms must
+    // agree iteration by iteration, not merely at the end.
+    let (a_norms, b_norms) = (&per_iteration[0], &per_iteration[1]);
+    assert_eq!(
+        a_norms.len(),
+        b_norms.len(),
+        "iteration counts differ ({unscaled_iters} vs {scaled_iters}): \
+         {a_norms:?} vs {b_norms:?}"
+    );
+    for (iteration, (x, y)) in a_norms.iter().zip(b_norms.iter()).enumerate() {
+        assert!(
+            (x - y).abs() <= 1e-9 * x.abs().max(1.0),
+            "reported gradient norms differ at iteration {iteration}: {x} vs {y} \
+             (all: {a_norms:?} vs {b_norms:?})"
+        );
+    }
+    assert!(
+        (unscaled_final - scaled_final).abs() <= 1e-9 * unscaled_final.abs().max(1.0),
+        "final_gradient_norm differs: {unscaled_final} vs {scaled_final}"
+    );
     Ok(())
 }
 

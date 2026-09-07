@@ -1009,11 +1009,18 @@ impl LevenbergMarquardt {
             .solve_augmented_equation(residuals, scaled_jacobian, &damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
-        // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
+        // Get the cached gradient and un-damped Hessian from the solver. Both
+        // are built from the Jacobian the solver was handed, so under Jacobi
+        // scaling they are `diag(s)·Jᵀr` and `diag(s)·JᵀJ·diag(s)` — the scaled
+        // quantities, which is what the step computation below needs.
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
-        let gradient_norm = gradient.norm_l2();
+        // The reported norm is a different matter: it is compared against
+        // `gradient_tolerance` and published to observers, so it belongs in the
+        // problem's own units and must not change with the scaling flag.
+        let gradient_norm =
+            crate::optimizer::unscaled_gradient_norm(gradient, self.jacobi_scaling.as_ref());
         let hessian_step = linear_solver
             .hessian_vec_product(&scaled_step)
             .ok_or_else(|| {

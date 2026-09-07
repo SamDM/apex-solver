@@ -1105,7 +1105,11 @@ impl DogLeg {
             // Increment reuse counter
             self.cache_reuse_count += 1;
 
-            let gradient_norm = cached_grad.norm_l2();
+            // Reported in the problem's own units, not the scaled ones — see
+            // `unscaled_gradient_norm`. Dog Leg enables Jacobi scaling by
+            // default, so this path is the common one here.
+            let gradient_norm =
+                optimizer::unscaled_gradient_norm(cached_grad, self.jacobi_scaling.as_ref());
             let mut steepest_descent = faer::Mat::zeros(cached_grad.nrows(), 1);
             for i in 0..cached_grad.nrows() {
                 steepest_descent[(i, 0)] = -cached_grad[(i, 0)];
@@ -1169,7 +1173,8 @@ impl DogLeg {
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
         let gradient = linear_solver.get_gradient()?;
-        let gradient_norm = gradient.norm_l2();
+        let gradient_norm =
+            optimizer::unscaled_gradient_norm(gradient, self.jacobi_scaling.as_ref());
 
         // 3. Compute steepest descent direction: δ_sd = -gradient
         let mut steepest_descent = faer::Mat::zeros(gradient.nrows(), 1);
